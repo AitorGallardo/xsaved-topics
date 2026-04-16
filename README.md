@@ -1,39 +1,44 @@
-# XSaved Tagger
+# XSaved Topics
 
-CLI tool that semantically tags Twitter/X bookmarks using the Claude API. Reads a collection of ~189 exported bookmarks, sends them to Claude Haiku in batches, and produces enriched metadata: semantic tags, summaries, content classification, and sentiment analysis.
+CLI tool that generates a **personalized topic taxonomy** for a user's Twitter/X bookmark collection and labels each bookmark against it. Built on the Claude API.
 
-## How it works
+Instead of applying a fixed, generic set of categories, it analyzes the user's actual corpus and proposes a small taxonomy of topics that reflects what that user actually reads — then assigns each bookmark to the best-fitting topics.
+
+## Architecture
+
+Two-phase pipeline:
 
 ```
-bookmarks.json → [batch of 15] → Claude Haiku → Zod validation → enriched-bookmarks.json
-                                       ↑
-                              system prompt (role + JSON schema)
-                              + assistant prefill (force raw JSON)
+┌──────────────────────────────────────────────────────────────┐
+│ Phase 1: Taxonomy Generation                                 │
+│   Input:  full corpus (bookmarks + manual tags + folders)    │
+│   Output: taxonomy.json                                      │
+│           5-8 top-level topics, 0-3 subtopics each           │
+│           each with { id, name, description }                │
+└──────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Phase 2: Labeling                                            │
+│   Input:  taxonomy + batch of bookmarks                      │
+│   Output: enriched-bookmarks.json                            │
+│           each bookmark → up to 5 topic ids from taxonomy    │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-1. **Load & strip** — Reads raw bookmarks, drops heavy fields (media blobs, avatar URLs) to minimize token usage
-2. **Batch** — Groups bookmarks into batches of 15 per API call (reduces overhead vs one-at-a-time)
-3. **Classify** — Claude analyzes each bookmark and returns structured JSON: 2-5 semantic tags, a one-line summary, content type, and sentiment
-4. **Validate** — Every response is validated against a Zod schema. Failed batches retry up to 2 times
-5. **Track cost** — Token usage and dollar cost are accumulated across all calls (including retries)
+Phase 1 is an expensive corpus-level call that runs once per regeneration. Phase 2 is cheap batched work that runs every time new bookmarks are added.
 
-## Output schema
+## Incremental regeneration
 
-```typescript
-{
-  id: string;
-  tags: string[];        // 2-5 lowercase semantic tags
-  summary: string;       // max 20 words
-  contentType: "opinion" | "advice" | "news" | "humor" | "resource" | "discussion" | "inspiration";
-  sentiment: "positive" | "negative" | "neutral" | "mixed";
-}
-```
+When new bookmarks arrive, the tool loads the existing taxonomy and asks Claude: *do these new bookmarks fit existing topics, or do they reveal a new topic we should add?* This keeps topic ids stable across runs — no silent renaming that would break downstream references.
 
-## Prompt techniques
+## Engineering patterns
 
-- **System/user separation** — System prompt defines Claude's role and output rules; user prompt passes the data
-- **Assistant prefill** — Pre-filling the assistant response with `[` forces Claude to continue as a JSON array, preventing markdown wrapping
-- **Defensive parsing** — Strips markdown fences as fallback, validates with Zod, retries on schema violations
+- **Corpus-aware prompting** — Phase 1 sees the whole collection, enabling real personalization
+- **Stable ids with human-readable names + descriptions** — Phase 2 has a precise anchor for consistent labeling
+- **Two-layer validation** — Zod schema for shape + custom check that every assigned topic id actually exists in the taxonomy
+- **Batched Phase 2 with retry** — 15 bookmarks per API call, 2 retries on validation failure
+- **Per-model cost tracking** — token usage and dollar cost tracked across all calls including retries
 
 ## Stack
 
@@ -47,6 +52,4 @@ npm install
 npm start
 ```
 
-## Cost
-
-~$0.15 for 189 bookmarks using `claude-haiku-4-5`. Token usage is tracked and printed after each run.
+On first run, generates `output/taxonomy.json` then labels all bookmarks. On subsequent runs, extends the existing taxonomy with any new topics needed and re-labels.

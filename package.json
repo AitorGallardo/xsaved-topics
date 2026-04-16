@@ -1,7 +1,7 @@
 {
-  "name": "xsaved-tagger",
-  "version": "1.0.0",
-  "description": "CLI tool to semantically tag bookmarks using Claude API",
+  "name": "xsaved-topics",
+  "version": "0.1.0",
+  "description": "CLI tool that generates a personalized topic taxonomy from a user's bookmarks and labels each bookmark against it, using the Claude API",
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts"
