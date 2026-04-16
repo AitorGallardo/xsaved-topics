@@ -11,19 +11,16 @@ export interface RawBookmark {
   bookmarked_at: string;
   tags: string[];
   notes?: string;
-  aiTopics?: string[];
   folderId?: string;
   media: unknown[];
 }
 
 /**
- * The lightweight version we'll send to Claude.
+ * The lightweight version we send to Claude.
  *
- * We strip `avatar_url` and `media` because:
- * - They contain file paths / nested objects that are meaningless to Claude
- * - Every token we send costs money — these fields add bulk with zero value
- * - We keep `mediaTypes` as a simple string[] so Claude knows if the tweet
- *   had images/video, without the full blob
+ * We strip heavy fields (avatar_url, media blobs) to minimize token cost.
+ * We keep `mediaTypes` as a flat string[] so Claude has context about
+ * media presence without the nested URLs/metadata.
  */
 export interface BookmarkLite {
   id: string;
@@ -33,28 +30,69 @@ export interface BookmarkLite {
   bookmarked_at: string;
   tags: string[];
   notes?: string;
-  aiTopics?: string[];
   mediaTypes?: string[];
 }
 
 /**
- * What Claude returns after analyzing a bookmark.
- * This mirrors the Zod schema in validate.ts — keep them in sync.
+ * A topic in the taxonomy.
+ *
+ * - `id` is kebab-case, stable across runs (e.g. "ai-engineering")
+ * - `name` is the display label (e.g. "AI Engineering")
+ * - `description` anchors Phase 2 labeling — with it, Claude has a
+ *   consistent reference instead of re-guessing from the name each time
+ * - `subtopics` is optional and capped at 1 level deep (no grandchildren)
  */
-export interface TagResult {
+export interface Topic {
   id: string;
-  tags: string[];
-  summary: string;
-  contentType: string;
-  sentiment: string;
+  name: string;
+  description: string;
+  subtopics?: SubTopic[];
 }
 
 /**
- * A bookmark enriched with Claude's analysis.
+ * A subtopic has the same shape as a topic but cannot have its own subtopics.
+ * Enforcing this at the type level prevents accidental deeper nesting.
+ */
+export interface SubTopic {
+  id: string;
+  name: string;
+  description: string;
+}
+
+/**
+ * A taxonomy is an ordered list of top-level topics.
+ */
+export type Taxonomy = Topic[];
+
+/**
+ * The result Claude returns for a single bookmark during labeling.
+ * `topics` contains topic ids that must exist in the taxonomy.
+ */
+export interface LabelingResult {
+  id: string;
+  topics: string[];
+}
+
+/**
+ * Structured output of the LLM-as-judge taxonomy critique.
+ * Used by the iteration loop to decide whether to accept or regenerate.
+ */
+export interface TaxonomyCritique {
+  dimensions: {
+    coverage: number;
+    granularity: number;
+    overlap: number;
+    naming: number;
+    balance: number;
+  };
+  overallScore: number;
+  issues: string[];
+  suggestions: string[];
+}
+
+/**
+ * A bookmark with topic labels added.
  */
 export interface EnrichedBookmark extends BookmarkLite {
-  aiTags: string[];
-  aiSummary: string;
-  aiContentType: string;
-  aiSentiment: string;
+  topics: string[];
 }

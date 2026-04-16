@@ -1,33 +1,166 @@
-import { BookmarkLite } from "./types.js";
+import type { BookmarkLite, Taxonomy } from "./types.js";
 
 /**
- * System prompt — sets Claude's role and output rules.
- *
- * Updated for batch mode: Claude receives an array of bookmarks
- * and returns an array of results, matched by index.
+ * Compact corpus view — short text + tags only.
+ * Full bookmark text would bloat the Phase 1 prompt dramatically.
+ * A 200-char snippet is enough signal for clustering.
  */
-export const SYSTEM_PROMPT = `You are an expert content categorizer for Twitter/X bookmarks.
+interface CorpusItem {
+  t: string;  // text snippet (first 200 chars)
+  a: string;  // author
+  g?: string[]; // tags (if any)
+}
 
-Your job is to analyze bookmarks and produce structured metadata.
+function compactForCorpus(bookmark: BookmarkLite): CorpusItem {
+  const item: CorpusItem = {
+    t: bookmark.text.slice(0, 200),
+    a: bookmark.author,
+  };
+  if (bookmark.tags.length > 0) item.g = bookmark.tags;
+  return item;
+}
 
-You will receive an array of bookmarks. For EACH bookmark, return a JSON object with:
-- "id": the bookmark's id (copy it exactly)
-- "tags": array of 2-5 lowercase semantic tags (e.g. "productivity", "ai", "startup-advice")
-- "summary": one sentence (max 20 words) summarizing the core message
-- "contentType": one of "opinion", "advice", "news", "humor", "resource", "discussion", "inspiration"
-- "sentiment": one of "positive", "negative", "neutral", "mixed"
+/**
+ * System prompt for Phase 1 — taxonomy generation.
+ *
+ * We ask Claude to:
+ * - Find 5-8 top-level topics (narrow taxonomy, our design choice)
+ * - Optionally add up to 3 subtopics per top-level
+ * - Produce kebab-case ids that match the name
+ * - Write descriptions that will anchor Phase 2 labeling
+ */
+export const TAXONOMY_SYSTEM_PROMPT = `You are an expert content curator who builds personalized topic taxonomies.
 
-Return a JSON array with one result per bookmark, in the same order as the input.
+You will receive a user's bookmark collection. Your job is to analyze the full corpus, identify the natural clusters of interest, and produce a taxonomy that reflects how THIS user actually organizes their reading.
+
+Output a JSON array of 5 to 8 top-level topics. Each topic has:
+- "id": lowercase kebab-case, derived from the name (e.g. "ai-engineering", "startup-advice")
+- "name": human-readable display name (e.g. "AI Engineering")
+- "description": 1-2 sentences (20-240 chars) explaining what belongs in this topic. This description will be used to guide labeling, so be specific and actionable.
+- "subtopics" (optional, max 3): array of { id, name, description } — same shape as topics but no further nesting
 
 Rules:
-- Tags should be specific and useful for filtering (not generic like "tweet" or "social media")
-- If the bookmark has existing tags, you may keep them but also add new ones
-- If the text is in a non-English language, still produce English tags and summary
-- Return ONLY the raw JSON array — no markdown fences, no \`\`\`json blocks, no explanation before or after`;
+- 5-8 top-level topics total — prefer the narrow end if the corpus is focused
+- Look for REAL clusters: if 30% of bookmarks are about AI, that's a topic. If 1 bookmark mentions cooking, that's not a topic.
+- Topic ids must be unique across the entire taxonomy (including subtopics)
+- Descriptions must be concrete enough that someone reading ONLY the description could decide if a bookmark fits
+- Avoid overlapping topics — "AI" and "Machine Learning" as separate top-level is bad; pick one
+- Output ONLY the raw JSON array. No markdown fences, no prose, no explanation.`;
 
 /**
- * Build the user prompt for a batch of bookmarks.
+ * Build the Phase 1 user prompt for a cold (first-time) taxonomy generation.
  */
-export function buildBatchPrompt(bookmarks: BookmarkLite[]): string {
-  return `Analyze these ${bookmarks.length} bookmarks:\n\n${JSON.stringify(bookmarks)}`;
+export function buildTaxonomyPrompt(bookmarks: BookmarkLite[]): string {
+  const corpus = bookmarks.map(compactForCorpus);
+  return `Analyze this collection of ${bookmarks.length} bookmarks and produce a personalized taxonomy:
+
+${JSON.stringify(corpus)}`;
+}
+
+/**
+ * Build the Phase 1 user prompt for incremental extension.
+ *
+ * When new bookmarks arrive, we show Claude the existing taxonomy and
+ * the new bookmarks, and ask whether any new topics should be added.
+ * Existing topic ids must be preserved.
+ */
+export function buildExtensionPrompt(
+  existingTaxonomy: Taxonomy,
+  newBookmarks: BookmarkLite[]
+): string {
+  const corpus = newBookmarks.map(compactForCorpus);
+  return `Here is the user's existing taxonomy:
+
+${JSON.stringify(existingTaxonomy)}
+
+Here are ${newBookmarks.length} new bookmarks they've added:
+
+${JSON.stringify(corpus)}
+
+Return an updated taxonomy that follows these rules:
+- PRESERVE every existing topic id, name, and description exactly unless a rename would genuinely improve clarity (prefer preservation)
+- If the new bookmarks fit existing topics, return the taxonomy unchanged
+- If they reveal a genuine new cluster (multiple bookmarks around a theme not covered), add a new top-level topic or subtopic
+- Total top-level topics must stay within 5-8 after any additions
+- Output ONLY the raw JSON array.`;
+}
+
+/**
+ * System prompt for the taxonomy critique (LLM-as-judge).
+ *
+ * We ask Claude to evaluate a proposed taxonomy across 5 dimensions and
+ * return a structured score + concrete issues + suggestions. The output
+ * drives the decision to accept or regenerate.
+ */
+export const CRITIQUE_SYSTEM_PROMPT = `You are a rigorous taxonomy reviewer. You evaluate proposed topic taxonomies against the bookmark corpus they're meant to classify.
+
+Score the taxonomy on five dimensions, each 1-10:
+- "coverage": do the topics cover what's in the corpus? Orphan themes with multiple bookmarks unreflected in the taxonomy = low score.
+- "granularity": are topics at a useful zoom level? Too broad (one topic catches half the corpus) or too narrow (a topic for 2 bookmarks) = low score.
+- "overlap": are topics semantically distinct? Redundant topics ("AI" + "Machine Learning" as separate) = low score. High score means no overlap.
+- "naming": are topic names specific and descriptions actionable enough for a labeler to decide fit? Vague or generic = low score.
+- "balance": will the taxonomy produce a reasonable distribution when labels are applied, or will one topic dominate / several be empty?
+
+Output ONLY a JSON object with this exact shape:
+{
+  "dimensions": {
+    "coverage": <int 1-10>,
+    "granularity": <int 1-10>,
+    "overlap": <int 1-10>,
+    "naming": <int 1-10>,
+    "balance": <int 1-10>
+  },
+  "overallScore": <int 1-10, your overall quality judgment>,
+  "issues": [<concrete problem strings, max 5>],
+  "suggestions": [<concrete fix strings aimed at a NEXT regeneration attempt, max 5>]
+}
+
+Be strict. A 7 means "good, ship it." A 5 means "usable but meaningfully flawed." Below 5 means the taxonomy has real problems.`;
+
+/**
+ * Build the user prompt for critiquing a taxonomy.
+ * We send a sample of the corpus (not all of it) to keep the call cheap.
+ */
+export function buildCritiquePrompt(
+  taxonomy: Taxonomy,
+  corpusSample: BookmarkLite[]
+): string {
+  const sample = corpusSample.map(compactForCorpus);
+  return `Here is the proposed taxonomy:
+
+${JSON.stringify(taxonomy)}
+
+Here is a sample of ${corpusSample.length} bookmarks from the corpus:
+
+${JSON.stringify(sample)}
+
+Evaluate the taxonomy. Output the JSON critique only.`;
+}
+
+/**
+ * Build a regeneration prompt that includes feedback from a previous critique.
+ * The model now has both the failed attempt and concrete reasons to improve it.
+ */
+export function buildRegenerationPrompt(
+  bookmarks: BookmarkLite[],
+  previousAttempt: Taxonomy,
+  previousScore: number,
+  issues: string[],
+  suggestions: string[]
+): string {
+  const corpus = bookmarks.map(compactForCorpus);
+  return `Your previous taxonomy attempt scored ${previousScore}/10 and had these problems:
+
+Issues:
+${issues.map((i) => `- ${i}`).join("\n")}
+
+Suggestions from the reviewer:
+${suggestions.map((s) => `- ${s}`).join("\n")}
+
+Previous attempt (for reference — do not simply return it unchanged):
+${JSON.stringify(previousAttempt)}
+
+Produce a new taxonomy for this corpus that addresses the issues above:
+
+${JSON.stringify(corpus)}`;
 }

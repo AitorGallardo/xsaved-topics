@@ -37,9 +37,7 @@ export function loadBookmarks(): BookmarkLite[] {
       tags: b.tags,
     };
 
-    // Only include optional fields if they have content
     if (b.notes) lite.notes = b.notes;
-    if (b.aiTopics && b.aiTopics.length > 0) lite.aiTopics = b.aiTopics;
 
     const mediaTypes = extractMediaTypes(b.media);
     if (mediaTypes) lite.mediaTypes = mediaTypes;
