@@ -7,7 +7,8 @@
     "start": "tsx src/index.ts",
     "taxonomy": "tsx src/cli-taxonomy.ts",
     "label": "tsx src/cli-label.ts",
-    "regenerate": "tsx src/cli-regenerate.ts"
+    "regenerate": "tsx src/cli-regenerate.ts",
+    "report": "tsx src/cli-report.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

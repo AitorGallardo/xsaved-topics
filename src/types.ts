@@ -30,6 +30,7 @@ export interface BookmarkLite {
   bookmarked_at: string;
   tags: string[];
   notes?: string;
+  folder?: string;
   mediaTypes?: string[];
 }
 

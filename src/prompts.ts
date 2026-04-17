@@ -9,6 +9,7 @@ interface CorpusItem {
   t: string;  // text snippet (first 200 chars)
   a: string;  // author
   g?: string[]; // tags (if any)
+  f?: string;  // folder name (if any)
 }
 
 function compactForCorpus(bookmark: BookmarkLite): CorpusItem {
@@ -17,6 +18,7 @@ function compactForCorpus(bookmark: BookmarkLite): CorpusItem {
     a: bookmark.author,
   };
   if (bookmark.tags.length > 0) item.g = bookmark.tags;
+  if (bookmark.folder) item.f = bookmark.folder;
   return item;
 }
 
@@ -49,11 +51,30 @@ Rules:
 
 /**
  * Build the Phase 1 user prompt for a cold (first-time) taxonomy generation.
+ *
+ * If existing topic/folder names are provided, they're included as seed context —
+ * Claude can see how the user already organizes their bookmarks and build on it.
  */
-export function buildTaxonomyPrompt(bookmarks: BookmarkLite[]): string {
+export function buildTaxonomyPrompt(
+  bookmarks: BookmarkLite[],
+  existingTopicNames?: string[]
+): string {
   const corpus = bookmarks.map(compactForCorpus);
-  return `Analyze this collection of ${bookmarks.length} bookmarks and produce a personalized taxonomy:
 
+  let seedContext = "";
+  if (existingTopicNames && existingTopicNames.length > 0) {
+    seedContext = `\nThe user has already manually created these topic/folder categories: ${existingTopicNames.join(", ")}. Use these as signals for what matters to this user — you may adopt, merge, or rename them, but don't ignore them.\n`;
+  }
+
+  // Extract unique folder names from the corpus
+  const folders = [...new Set(bookmarks.map((b) => b.folder).filter(Boolean))];
+  let folderContext = "";
+  if (folders.length > 0) {
+    folderContext = `\nThe user's existing folders: ${folders.join(", ")}. These represent how the user groups bookmarks today — factor them into your taxonomy.\n`;
+  }
+
+  return `Analyze this collection of ${bookmarks.length} bookmarks and produce a personalized taxonomy:
+${seedContext}${folderContext}
 ${JSON.stringify(corpus)}`;
 }
 

@@ -22,9 +22,10 @@ const DEFAULT_CRITIQUE_SAMPLE_SIZE = 40;
 export async function generateTaxonomy(
   bookmarks: BookmarkLite[],
   costTracker: CostTracker,
-  prompt?: string
+  prompt?: string,
+  existingTopicNames?: string[]
 ): Promise<Taxonomy | null> {
-  const userPrompt = prompt ?? buildTaxonomyPrompt(bookmarks);
+  const userPrompt = prompt ?? buildTaxonomyPrompt(bookmarks, existingTopicNames);
 
   for (let attempt = 1; attempt <= MAX_PARSE_RETRIES + 1; attempt++) {
     cli.spin("Generating taxonomy...");
@@ -90,10 +91,11 @@ export async function critiqueTaxonomy(
   return null;
 }
 
-interface IterationOptions {
+export interface IterationOptions {
   maxIterations?: number;
   acceptanceThreshold?: number;
   sampleSize?: number;
+  existingTopicNames?: string[];
 }
 
 export async function generateTaxonomyWithIteration(
@@ -118,7 +120,7 @@ export async function generateTaxonomyWithIteration(
 
     let candidate: Taxonomy | null;
     if (iteration === 0 || !bestTaxonomy || !bestCritique) {
-      candidate = await generateTaxonomy(bookmarks, costTracker);
+      candidate = await generateTaxonomy(bookmarks, costTracker, undefined, options.existingTopicNames);
     } else {
       const regenPrompt = buildRegenerationPrompt(
         bookmarks,
