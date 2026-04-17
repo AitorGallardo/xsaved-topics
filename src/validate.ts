@@ -33,11 +33,16 @@ export const TaxonomySchema = z.array(TopicSchema).min(5).max(8);
 
 /**
  * Schema for one bookmark's labeling result.
- * Topic count bounds: 1-5 per bookmark.
+ * Topic count bounds: 0-5 per bookmark.
+ *
+ * Empty topics means "unclassified" — a legitimate outcome when a bookmark
+ * doesn't fit any topic in the taxonomy well (e.g., a very short/ambiguous
+ * tweet). Forcing Claude to guess would produce worse data than accepting
+ * no label. The labeler tracks unclassified counts separately.
  */
 const LabelingResultSchema = z.object({
   id: z.string(),
-  topics: z.array(z.string()).min(1).max(5),
+  topics: z.array(z.string()).max(5),
 });
 
 export const LabelingBatchSchema = z.array(LabelingResultSchema);
@@ -125,46 +130,74 @@ export function collectTopicIds(taxonomy: Taxonomy): Set<string> {
 }
 
 /**
- * Parse Claude's raw text response into a validated batch of labeling results.
+ * Result of parsing a labeling batch.
+ * `clean` contains results where every topic id is valid.
+ * `partial` contains results where at least one valid topic remained after
+ *   stripping hallucinated ids (the result was partially usable).
+ * `rejected` contains results where ALL topic ids were hallucinated (unrecoverable).
+ * `hallucinations` is the flat list of invalid topic ids found, for logging.
+ */
+export interface LabelingParseResult {
+  clean: LabelingResult[];
+  partial: LabelingResult[];
+  rejected: string[]; // bookmark ids that couldn't be labeled at all
+  hallucinations: string[];
+}
+
+/**
+ * Parse Claude's raw text response into validated batch labeling results.
  *
  * Two-stage validation:
  * 1. Zod checks shape (array of { id, topics: string[] } with bounded length)
- * 2. Custom check verifies each topic id exists in the taxonomy — this
- *    catches hallucinated ids that Zod can't know about
+ * 2. Runtime check filters topic ids against the current taxonomy
  *
- * Returns null if any stage fails.
+ * Unlike Phase 1 (all-or-nothing), Phase 2 returns partial results. If Claude
+ * labels 14/15 bookmarks correctly and hallucinates one id, we keep the 14
+ * good ones. The batch retry can then target only the rejected bookmarks.
+ *
+ * Returns null only if the shape is structurally broken (JSON parse or Zod fail).
  */
 export function parseLabelingBatch(
   raw: string,
   taxonomy: Taxonomy
-): LabelingResult[] | null {
+): LabelingParseResult | null {
   try {
     const json = JSON.parse(stripFences(raw));
     const results = LabelingBatchSchema.parse(json);
 
     const validIds = collectTopicIds(taxonomy);
-    const hallucinated: string[] = [];
+    const clean: LabelingResult[] = [];
+    const partial: LabelingResult[] = [];
+    const rejected: string[] = [];
+    const hallucinations: string[] = [];
 
     for (const result of results) {
+      const validTopics: string[] = [];
+      const invalidTopics: string[] = [];
+
       for (const topicId of result.topics) {
-        if (!validIds.has(topicId)) {
-          hallucinated.push(`${result.id} → "${topicId}"`);
-        }
+        if (validIds.has(topicId)) validTopics.push(topicId);
+        else invalidTopics.push(topicId);
+      }
+
+      for (const bad of invalidTopics) {
+        hallucinations.push(`${result.id} → "${bad}"`);
+      }
+
+      if (invalidTopics.length === 0) {
+        clean.push(result);
+      } else if (validTopics.length > 0) {
+        partial.push({ id: result.id, topics: validTopics });
+      } else {
+        rejected.push(result.id);
       }
     }
 
-    if (hallucinated.length > 0) {
-      console.warn(
-        `Hallucinated topic ids: ${hallucinated.slice(0, 3).join(", ")}${hallucinated.length > 3 ? "..." : ""}`
-      );
-      return null;
-    }
-
-    return results;
+    return { clean, partial, rejected, hallucinations };
   } catch (error) {
     if (error instanceof z.ZodError) {
       console.warn(
-        "Labeling validation failed:",
+        "Labeling shape validation failed:",
         error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")
       );
     } else if (error instanceof SyntaxError) {

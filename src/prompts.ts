@@ -86,6 +86,45 @@ Return an updated taxonomy that follows these rules:
 }
 
 /**
+ * System prompt for Phase 2 — labeling a batch of bookmarks against the taxonomy.
+ *
+ * We give Claude the whole taxonomy (with descriptions) in the user prompt
+ * and ask it to assign 1-5 topic ids per bookmark from the provided set only.
+ * Every id returned MUST exist in the taxonomy — descriptions are the anchor.
+ */
+export const LABELING_SYSTEM_PROMPT = `You are a content classifier. For each bookmark, you assign the most fitting topic ids from a provided taxonomy.
+
+Rules:
+- For each bookmark, return a JSON object with { "id": <bookmark id>, "topics": <array of 0-5 topic ids> }
+- Topic ids MUST come from the provided taxonomy. Use the exact id strings. Never invent or modify ids.
+- Prefer the most specific topic: if a subtopic fits, use it instead of the parent top-level topic
+- Assign 1-3 topic ids for typical bookmarks. Use 4-5 only when the content genuinely spans multiple distinct themes.
+- If a bookmark truly does not fit any topic in the taxonomy (very rare — only for highly ambiguous or off-topic content), return an EMPTY topics array. Do not force a bad fit.
+- Use the topic "description" field as your guide — the name alone may not be specific enough
+- Return a JSON array with one result per bookmark, same order as input
+- Output ONLY the raw JSON array. No markdown fences, no commentary.`;
+
+/**
+ * Build the user prompt for a labeling batch.
+ */
+export function buildLabelingPrompt(
+  taxonomy: Taxonomy,
+  bookmarks: BookmarkLite[]
+): string {
+  const compactCorpus = bookmarks.map(compactForCorpus).map((c, i) => ({
+    id: bookmarks[i].id,
+    ...c,
+  }));
+  return `Taxonomy to label against:
+
+${JSON.stringify(taxonomy)}
+
+Bookmarks to label (${bookmarks.length}):
+
+${JSON.stringify(compactCorpus)}`;
+}
+
+/**
  * System prompt for the taxonomy critique (LLM-as-judge).
  *
  * We ask Claude to evaluate a proposed taxonomy across 5 dimensions and
