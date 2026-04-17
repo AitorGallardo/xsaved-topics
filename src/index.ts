@@ -1,9 +1,5 @@
 /**
- * CLI entry point.
- *
- * First run:       generates taxonomy → labels all bookmarks → writes both files
- * Incremental run: loads existing taxonomy → extends if needed → labels → writes
- *
+ * Full pipeline: Phase 1 (taxonomy) → Phase 2 (labeling)
  * Run: npm start
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -12,6 +8,7 @@ import { generateTaxonomyWithIteration, extendTaxonomy } from "./taxonomy.js";
 import { labelAllBookmarks } from "./labeler.js";
 import { parseTaxonomy } from "./validate.js";
 import { CostTracker } from "./cost-tracker.js";
+import { cli } from "./cli.js";
 import type { Taxonomy } from "./types.js";
 
 const OUTPUT_DIR = new URL("../output/", import.meta.url);
@@ -22,82 +19,125 @@ async function main() {
   const startTime = Date.now();
   const costTracker = new CostTracker();
 
-  // Load bookmarks
-  const bookmarks = loadBookmarks();
-  console.log(`Loaded ${bookmarks.length} bookmarks`);
+  cli.header("XSaved Topics");
 
-  // Ensure output directory exists
+  const bookmarks = loadBookmarks();
+  cli.info(`Loaded ${bookmarks.length} bookmarks`);
+
   mkdirSync(OUTPUT_DIR, { recursive: true });
 
-  // Phase 1: Taxonomy — generate or extend
+  // ── Phase 1: Taxonomy ──
   let taxonomy: Taxonomy;
-  const existingTaxonomyPath = TAXONOMY_PATH;
 
-  if (existsSync(existingTaxonomyPath)) {
-    console.log(`\nFound existing taxonomy at ${existingTaxonomyPath.pathname}`);
-    const raw = readFileSync(existingTaxonomyPath, "utf-8");
+  if (existsSync(TAXONOMY_PATH)) {
+    cli.info(`Found existing taxonomy at ${TAXONOMY_PATH.pathname}`);
+    const raw = readFileSync(TAXONOMY_PATH, "utf-8");
     const existing = parseTaxonomy(raw);
 
     if (!existing) {
-      console.error("Existing taxonomy.json is invalid. Delete it to regenerate.");
+      cli.error("Existing taxonomy.json is invalid. Delete it to regenerate.");
       process.exit(1);
     }
 
-    console.log(`  ${existing.length} top-level topics loaded`);
+    cli.info(`${existing.length} top-level topics loaded`);
     taxonomy = await extendTaxonomy(existing, bookmarks, costTracker);
   } else {
-    console.log(`\nNo existing taxonomy found — generating from scratch`);
     const result = await generateTaxonomyWithIteration(bookmarks, costTracker);
 
     if (!result.taxonomy) {
-      console.error("\nTaxonomy generation failed. Check logs above.");
+      cli.error("Taxonomy generation failed. Check logs above.");
       process.exit(1);
     }
 
     taxonomy = result.taxonomy;
     if (result.critique) {
-      console.log(`  Final quality score: ${result.critique.overallScore}/10`);
+      cli.success(`Final quality: ${result.critique.overallScore}/10 (${result.iterations} iteration${result.iterations !== 1 ? "s" : ""})`);
     }
   }
 
-  // Write taxonomy
   writeFileSync(TAXONOMY_PATH, JSON.stringify(taxonomy, null, 2));
-  console.log(`\nTaxonomy written to ${TAXONOMY_PATH.pathname}`);
+  cli.success(`Taxonomy saved → ${TAXONOMY_PATH.pathname}`);
 
-  // Print taxonomy summary
-  console.log(`\n--- Taxonomy ---`);
-  for (const topic of taxonomy) {
-    const subCount = topic.subtopics?.length ?? 0;
-    const subLabel = subCount > 0 ? ` (${subCount} subtopics)` : "";
-    console.log(`  ${topic.name}  [${topic.id}]${subLabel}`);
-  }
+  printTaxonomy(taxonomy);
 
-  // Phase 2: Labeling
+  // ── Phase 2: Labeling ──
   const { enriched, rejectedIds, totalHallucinations } = await labelAllBookmarks(
     bookmarks,
     taxonomy,
     costTracker
   );
 
-  // Write enriched bookmarks
   writeFileSync(ENRICHED_PATH, JSON.stringify(enriched, null, 2));
 
-  // Final summary
+  // ── Summary ──
+  printSummary(enriched, bookmarks.length, rejectedIds, totalHallucinations, startTime, costTracker, taxonomy);
+}
+
+function printTaxonomy(taxonomy: Taxonomy) {
+  cli.subheader("Generated Taxonomy");
+  for (const topic of taxonomy) {
+    const subCount = topic.subtopics?.length ?? 0;
+    const subLabel = subCount > 0 ? ` (${subCount} subtopics)` : "";
+    cli.success(`${topic.name}  [${topic.id}]${subLabel}`);
+    for (const sub of topic.subtopics ?? []) {
+      cli.info(`  └─ ${sub.name}  [${sub.id}]`);
+    }
+  }
+}
+
+function printSummary(
+  enriched: { topics: string[] }[],
+  totalBookmarks: number,
+  rejectedIds: string[],
+  totalHallucinations: number,
+  startTime: number,
+  costTracker: CostTracker,
+  taxonomy: Taxonomy
+) {
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   const unclassified = enriched.filter((b) => b.topics.length === 0).length;
+  const classified = enriched.length - unclassified;
 
-  console.log(`\n${"=".repeat(50)}`);
-  console.log(`Done in ${elapsed}s`);
-  console.log(`  Labeled:        ${enriched.length}/${bookmarks.length}`);
-  if (unclassified > 0) console.log(`  Unclassified:   ${unclassified}`);
-  if (rejectedIds.length > 0) console.log(`  Rejected:       ${rejectedIds.length}`);
-  if (totalHallucinations > 0) console.log(`  Hallucinations: ${totalHallucinations}`);
+  cli.header("Summary");
+  cli.table([
+    ["Time", `${elapsed}s`],
+    ["Bookmarks", `${totalBookmarks}`],
+    ["Classified", `${classified}`],
+    ["Unclassified", `${unclassified}`],
+    ["Rejected", `${rejectedIds.length}`],
+    ["Hallucinations", `${totalHallucinations}`],
+  ]);
+
+  // Topic distribution
+  const dist = new Map<string, number>();
+  for (const b of enriched) {
+    for (const t of b.topics) {
+      dist.set(t, (dist.get(t) ?? 0) + 1);
+    }
+  }
+
+  cli.subheader("Topic Distribution");
+  const topicNames = new Map<string, string>();
+  for (const topic of taxonomy) {
+    topicNames.set(topic.id, topic.name);
+    for (const sub of topic.subtopics ?? []) {
+      topicNames.set(sub.id, `  └─ ${sub.name}`);
+    }
+  }
+
+  const sorted = [...dist.entries()].sort((a, b) => b[1] - a[1]);
+  const maxCount = sorted[0]?.[1] ?? 1;
+  for (const [id, count] of sorted) {
+    const barLen = Math.round((count / maxCount) * 15);
+    const bar = "█".repeat(barLen) + "░".repeat(15 - barLen);
+    const name = topicNames.get(id) ?? id;
+    cli.info(`${bar} ${String(count).padStart(3)} ${name}`);
+  }
+
   costTracker.printSummary();
-  console.log(`\n  Taxonomy: ${TAXONOMY_PATH.pathname}`);
-  console.log(`  Output:   ${ENRICHED_PATH.pathname}`);
 }
 
 main().catch((err) => {
-  console.error("Fatal error:", err);
+  cli.error(`Fatal: ${err.message ?? err}`);
   process.exit(1);
 });

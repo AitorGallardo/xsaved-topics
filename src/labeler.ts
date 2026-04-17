@@ -2,6 +2,7 @@ import { anthropic } from "./claude-client.js";
 import { LABELING_SYSTEM_PROMPT, buildLabelingPrompt } from "./prompts.js";
 import { parseLabelingBatch } from "./validate.js";
 import { CostTracker } from "./cost-tracker.js";
+import { cli } from "./cli.js";
 import type {
   BookmarkLite,
   Taxonomy,
@@ -13,9 +14,6 @@ const LABELING_MODEL = "claude-haiku-4-5-20251001";
 const BATCH_SIZE = 15;
 const MAX_RETRIES = 2;
 
-/**
- * Split an array into chunks of the given size.
- */
 function chunk<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
   for (let i = 0; i < arr.length; i += size) {
@@ -25,24 +23,18 @@ function chunk<T>(arr: T[], size: number): T[][] {
 }
 
 interface BatchStats {
-  clean: number;         // fully valid result with at least 1 topic
-  unclassified: number;  // valid result with empty topics (deliberately unlabeled)
-  partial: number;       // had some hallucinated ids, we kept the valid ones
-  rejected: number;      // couldn't label at all after all retries
+  clean: number;
+  unclassified: number;
+  partial: number;
+  rejected: number;
   hallucinations: string[];
 }
 
-/**
- * Process a single batch with retry.
- * On each attempt, we call Claude, validate, and track partial progress.
- * If a result is rejected (all topic ids hallucinated), it gets retried
- * along with any shape-failed bookmarks. Clean and partial results are
- * kept across attempts — we don't redo work that already succeeded.
- */
 async function processBatch(
   batch: BookmarkLite[],
   taxonomy: Taxonomy,
   batchIndex: number,
+  totalBatches: number,
   costTracker: CostTracker
 ): Promise<{ results: LabelingResult[]; stats: BatchStats }> {
   const collected = new Map<string, LabelingResult>();
@@ -57,6 +49,8 @@ async function processBatch(
 
   for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
     if (remaining.length === 0) break;
+
+    cli.spin(`Labeling batch ${batchIndex + 1}/${totalBatches}...`);
 
     const response = await anthropic.messages.create({
       model: LABELING_MODEL,
@@ -74,34 +68,30 @@ async function processBatch(
     const parsed = parseLabelingBatch(raw, taxonomy);
 
     if (!parsed) {
-      // Structural failure (shape/JSON) — retry the whole remaining set
+      cli.stop();
       if (attempt <= MAX_RETRIES) {
-        console.warn(`  ⚠ Batch ${batchIndex + 1} attempt ${attempt}: shape failed. Retrying...`);
+        cli.warn(`Batch ${batchIndex + 1} attempt ${attempt}: shape failed. Retrying...`);
       } else {
-        console.error(
-          `  ✗ Batch ${batchIndex + 1}: shape failed after ${MAX_RETRIES + 1} attempts. Dropping ${remaining.length} bookmarks.`
-        );
+        cli.error(`Batch ${batchIndex + 1}: shape failed after ${MAX_RETRIES + 1} attempts. Dropping ${remaining.length} bookmarks.`);
       }
       continue;
     }
 
-    // Collect clean + partial results (they're valid enough to keep)
     for (const r of parsed.clean) collected.set(r.id, r);
     for (const r of parsed.partial) collected.set(r.id, r);
     stats.hallucinations.push(...parsed.hallucinations);
 
-    // Only rejected ids need to be retried
     const rejectedIds = new Set(parsed.rejected);
     remaining = remaining.filter((b) => rejectedIds.has(b.id));
 
     if (remaining.length > 0 && attempt <= MAX_RETRIES) {
-      console.warn(
-        `  ⚠ Batch ${batchIndex + 1} attempt ${attempt}: ${remaining.length} rejected. Retrying those only...`
-      );
+      cli.stop();
+      cli.warn(`Batch ${batchIndex + 1}: ${remaining.length} rejected. Retrying those only...`);
     }
   }
 
-  // Finalize stats
+  cli.stop();
+
   const results = Array.from(collected.values());
   for (const r of results) {
     const hadInvalid = stats.hallucinations.some((h) => h.startsWith(`${r.id} →`));
@@ -109,15 +99,11 @@ async function processBatch(
     else if (r.topics.length === 0) stats.unclassified++;
     else stats.clean++;
   }
-  stats.rejected = remaining.length; // whatever's left after all retries
+  stats.rejected = remaining.length;
 
   return { results, stats };
 }
 
-/**
- * Label all bookmarks against the taxonomy.
- * Returns enriched bookmarks + a summary of what succeeded and what didn't.
- */
 export async function labelAllBookmarks(
   bookmarks: BookmarkLite[],
   taxonomy: Taxonomy,
@@ -132,29 +118,26 @@ export async function labelAllBookmarks(
   const rejectedIds: string[] = [];
   let totalHallucinations = 0;
 
-  console.log(
-    `\nPhase 2: Labeling ${bookmarks.length} bookmarks in ${batches.length} batches of ~${BATCH_SIZE} (using ${LABELING_MODEL})\n`
-  );
+  cli.header("Phase 2: Labeling");
+  cli.info(`Model: ${LABELING_MODEL} | ${bookmarks.length} bookmarks in ${batches.length} batches`);
+  cli.blank();
 
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
-    console.log(`  Batch ${i + 1}/${batches.length} (${batch.length} bookmarks)...`);
-
-    const { results, stats } = await processBatch(batch, taxonomy, i, costTracker);
+    const { results, stats } = await processBatch(batch, taxonomy, i, batches.length, costTracker);
 
     for (const r of results) allResults.set(r.id, r);
     rejectedIds.push(...batch.filter((b) => !allResults.has(b.id)).map((b) => b.id));
     totalHallucinations += stats.hallucinations.length;
 
-    const parts: string[] = [];
-    if (stats.clean) parts.push(`${stats.clean} clean`);
+    const parts: string[] = [`${stats.clean} clean`];
     if (stats.unclassified) parts.push(`${stats.unclassified} unclassified`);
     if (stats.partial) parts.push(`${stats.partial} partial`);
     if (stats.rejected) parts.push(`${stats.rejected} rejected`);
-    console.log(`    ✓ ${parts.join(", ")}`);
+
+    cli.progress(i + 1, batches.length, parts.join(", "));
   }
 
-  // Merge results with original bookmarks
   const enriched: EnrichedBookmark[] = [];
   for (const bookmark of bookmarks) {
     const result = allResults.get(bookmark.id);

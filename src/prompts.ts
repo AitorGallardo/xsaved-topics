@@ -36,7 +36,7 @@ You will receive a user's bookmark collection. Your job is to analyze the full c
 Output a JSON array of 5 to 8 top-level topics. Each topic has:
 - "id": lowercase kebab-case, derived from the name (e.g. "ai-engineering", "startup-advice")
 - "name": human-readable display name (e.g. "AI Engineering")
-- "description": 1-2 sentences (20-240 chars) explaining what belongs in this topic. This description will be used to guide labeling, so be specific and actionable.
+- "description": 1-2 sentences (20-300 chars) explaining what belongs in this topic. This description will be used to guide labeling, so be specific and actionable.
 - "subtopics" (optional, max 3): array of { id, name, description } — same shape as topics but no further nesting
 
 Rules:

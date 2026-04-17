@@ -11,7 +11,7 @@ const SubTopicSchema = z.object({
     .string()
     .regex(/^[a-z0-9-]+$/, "id must be lowercase kebab-case (letters, digits, dashes)"),
   name: z.string().min(1).max(50),
-  description: z.string().min(20).max(240),
+  description: z.string().min(20).max(300),
 });
 
 /**
@@ -22,7 +22,7 @@ const TopicSchema = z.object({
     .string()
     .regex(/^[a-z0-9-]+$/, "id must be lowercase kebab-case (letters, digits, dashes)"),
   name: z.string().min(1).max(50),
-  description: z.string().min(20).max(240),
+  description: z.string().min(20).max(300),
   subtopics: z.array(SubTopicSchema).max(3).optional(),
 });
 
